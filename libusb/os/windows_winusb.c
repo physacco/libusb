@@ -2405,6 +2405,7 @@ static int winusbx_exit(int sub_api)
 	return LIBUSB_SUCCESS;
 }
 
+#if 0 // patched by zhangqi, 2017.2.27
 // NB: open and close must ensure that they only handle interface of
 // the right API type, as these functions can be called wholesale from
 // composite_open(), with interfaces belonging to different APIs
@@ -2442,6 +2443,55 @@ static int winusbx_open(int sub_api, struct libusb_device_handle *dev_handle)
 
 	return LIBUSB_SUCCESS;
 }
+#else
+// NB: open and close must ensure that they only handle interface of
+// the right API type, as these functions can be called wholesale from
+// composite_open(), with interfaces belonging to different APIs
+static int winusbx_open(int sub_api, struct libusb_device_handle *dev_handle)
+{
+	struct libusb_context *ctx = DEVICE_CTX(dev_handle->dev);
+	struct windows_device_priv *priv = _device_priv(dev_handle->dev);
+	struct windows_device_handle_priv *handle_priv = _device_handle_priv(dev_handle);
+
+	HANDLE file_handle;
+	int i;
+
+	CHECK_WINUSBX_AVAILABLE(sub_api);
+
+	// WinUSB requires a separate handle for each interface
+	int count = 0;
+	int last_error = 0;
+	for (i = 0; i < USB_MAXINTERFACES; i++) {
+		if ((priv->usb_interface[i].path != NULL)
+			&& (priv->usb_interface[i].apib->id == USB_API_WINUSBX)) {
+			file_handle = CreateFileA(priv->usb_interface[i].path, GENERIC_WRITE | GENERIC_READ, FILE_SHARE_WRITE | FILE_SHARE_READ,
+				NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
+			if (file_handle == INVALID_HANDLE_VALUE) {
+				usbi_err(ctx, "could not open device %s (interface %d): %s", priv->usb_interface[i].path, i, windows_error_str(0));
+				switch (GetLastError()) {
+				case ERROR_FILE_NOT_FOUND: // The device was disconnected
+					last_error = LIBUSB_ERROR_NO_DEVICE;
+				case ERROR_ACCESS_DENIED:
+					last_error = LIBUSB_ERROR_ACCESS;
+				default:
+					last_error = LIBUSB_ERROR_IO;
+				}
+			}
+			else {
+				count += 1;
+			}
+			handle_priv->interface_handle[i].dev_handle = file_handle;  // may be invalid
+		}
+	}
+
+	if (count > 0) {
+		return LIBUSB_SUCCESS;
+	}
+	else {
+		return last_error;
+	}
+}
+#endif
 
 static void winusbx_close(int sub_api, struct libusb_device_handle *dev_handle)
 {
